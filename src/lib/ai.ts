@@ -26,6 +26,7 @@ export type AiTask =
   | "questions"
   | "draft"
   | "import"
+  | "parseProfile"
   | "summary"
   | "bullet"
   | "suggestBullets"

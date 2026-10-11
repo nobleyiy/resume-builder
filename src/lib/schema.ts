@@ -102,6 +102,8 @@ export type Resume = {
   targetRole: string;
   jobDescription: string;
   customInstructions: string;
+  /** Immutable imported facts; tailoring only changes the working resume. */
+  masterProfile?: import("./masterProfile").MasterProfile;
 };
 
 export type AppStatus = "saved" | "applied" | "interview" | "offer" | "rejected";
@@ -293,6 +295,9 @@ export const DraftResume = z.object({
   certifications: z.array(DraftCertification),
 });
 export type DraftResume = z.infer<typeof DraftResume>;
+
+export const ProfileDraft = DraftResume.extend({ achievements: z.array(s) });
+export type ProfileDraft = z.infer<typeof ProfileDraft>;
 
 export const QuestionsOut = z.object({
   questions: z.array(

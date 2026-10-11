@@ -26,6 +26,6 @@ export function buildPrompt(name: TaskName, data: unknown): { system: string; us
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const user = (task.user as (i: any) => string)(data);
   const schema = compactSchema(task.output);
-  const system = `${task.prose ? PROSE_SYSTEM : SYSTEM}\n\n${task.system}\n\nReturn ONLY a single JSON object with the actual data, no prose and no code fences. Do not repeat or output the schema itself. The object must match this JSON schema exactly:\n${JSON.stringify(schema)}`;
+  const system = `${name === "parseProfile" ? "You extract structured CV facts verbatim. Preserve source wording and conflicting facts. Never write or improve a resume." : task.prose ? PROSE_SYSTEM : SYSTEM}\n\n${task.system}\n\nReturn ONLY a single JSON object with the actual data, no prose and no code fences. Do not repeat or output the schema itself. The object must match this JSON schema exactly:\n${JSON.stringify(schema)}`;
   return { system, user };
 }

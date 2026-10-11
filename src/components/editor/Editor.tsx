@@ -42,6 +42,7 @@ import { LinkedInDrawer } from "./LinkedInDrawer";
 import { AchievementsSection, CertificationsSection, DetailsSection, EducationSection, SummarySection } from "./Sections";
 import { ExperienceSection, ProjectsSection } from "./Entries";
 import { SkillsSection } from "./Skills";
+import { MasterProfilePanel } from "./MasterProfilePanel";
 import { TailorDrawer } from "./TailorDrawer";
 
 export type Active = "basics" | SectionId;
@@ -311,6 +312,7 @@ export function Editor({ id }: { id: string }) {
             ))}
           </div>
           <div className="mx-auto max-w-2xl px-5 py-8 md:px-8 md:py-10">
+            {resume.masterProfile && <MasterProfilePanel profile={resume.masterProfile} />}
             {active === "basics" && <DetailsSection resume={resume} update={update} />}
             {active === "summary" && <SummarySection resume={resume} update={update} />}
             {active === "achievements" && <AchievementsSection resume={resume} update={update} />}

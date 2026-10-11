@@ -18,9 +18,10 @@ import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { Wordmark } from "@/components/ui/Wordmark";
 import { useAiProvider } from "@/lib/aiProvider";
 import { manualInline } from "@/lib/manualBridge";
-import { ACCEPT, extractFile, MAX_BYTES, type FileKind } from "@/lib/ats/extract";
+import { ACCEPT, extractFile, type FileKind } from "@/lib/ats/extract";
 import { cn } from "@/lib/cn";
-import { emptyBasics, emptyResume, hydrateDraft, type Basics, type DraftResume, type Question } from "@/lib/schema";
+import { emptyBasics, emptyResume, hydrateDraft, type Basics, type DraftResume, type ProfileDraft, type Question, uid } from "@/lib/schema";
+import { mergeProfiles, validateProfileDraft, type ProfileSource } from "@/lib/masterProfile";
 import { store } from "@/lib/store";
 import { Card, QuestionList, SheetPreview, STEP_LABELS, Stepper } from "./Parts";
 
@@ -73,11 +74,15 @@ export function Interview() {
   const [dir, setDir] = useState<"next" | "back">("next");
   const [importText, setImportText] = useState("");
   const [importMode, setImportMode] = useState<"paste" | "upload">("paste");
-  const [importFile, setImportFile] = useState<{ name: string; kind: FileKind; chars: number; error?: string } | null>(null);
+  const [importFiles, setImportFiles] = useState<{ id: string; file: File; name: string; kind: FileKind; text: string; chars: number; error?: string; reading: boolean }[]>([]);
+  const [processing, setProcessing] = useState(false);
+  const [importProgress, setImportProgress] = useState({ index: 0, total: 0, name: "" });
+  const [importError, setImportError] = useState<string | null>(null);
+  const readyToImport = importMode === "paste" ? importText.trim().length > 40 && importText.length <= 100000 : importFiles.length > 0 && importFiles.every((f) => !f.reading && !f.error);
   const [importBusy, setImportBusy] = useState(false);
   const [importDrag, setImportDrag] = useState(false);
   const fetching = useRef(false);
-  const importFileRef = useRef<File | null>(null);
+  const importLock = useRef(false);
 
   // A cancelled manual exchange is not an error worth shouting about.
   const err = error && error !== "Cancelled." ? error : null;
@@ -87,34 +92,19 @@ export function Interview() {
     if (next !== "import") setReached((r) => Math.max(r, STAGE_INDEX[next]));
   };
 
-  const takeImportFile = async (file: File) => {
-    if (file.size > MAX_BYTES) {
-      setImportFile({ name: file.name, kind: "txt", chars: 0, error: "That file is over 8 MB. Export a lighter one." });
-      return;
-    }
-    importFileRef.current = file;
+  const takeImportFiles = async (files: File[]) => {
+    if (importLock.current) return;
+    setImportError(null);
+    const queued = files.map((file) => ({ id: uid(), file, name: file.name, kind: "txt" as FileKind, text: "", chars: 0, reading: true }));
+    setImportFiles((current) => [...current, ...queued]);
     setImportBusy(true);
-    const ex = await extractFile(file);
-    setImportBusy(false);
-    setImportText(ex.text);
-    setImportFile({ name: file.name, kind: ex.kind, chars: ex.chars, error: ex.error });
-  };
-
-  // Keep the uploaded file (as a data URL) for this session so the editor can reopen it.
-  const stashSourceFile = async (resumeId: string) => {
-    const file = importFileRef.current;
-    if (!file) return;
-    try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result as string);
-        r.onerror = reject;
-        r.readAsDataURL(file);
-      });
-      sessionStorage.setItem(`bespoke:srcfile:${resumeId}`, JSON.stringify({ name: file.name, url: dataUrl }));
-    } catch {
-      /* quota or read error: skip, the resume still opens */
+    for (const item of queued) {
+      const ex = await extractFile(item.file);
+      const error = ex.error || (ex.text.trim().length <= 40 ? "Almost no text came out. Use a text-based CV or paste its text." : ex.text.length > 100000 ? "This CV exceeds 100,000 characters. Use a shorter file." : undefined);
+      // Removed files stay removed even when extraction finishes later.
+      setImportFiles((current) => current.map((f) => f.id === item.id ? { ...f, ...ex, error, reading: false } : f));
     }
+    setImportBusy(false);
   };
 
   const applyStandard = useCallback((note: string) => {
@@ -192,14 +182,45 @@ export function Interview() {
   };
 
   const runImport = async () => {
+    if (importLock.current || !readyToImport) return;
+    importLock.current = true;
+    setProcessing(true);
+    setImportError(null);
     reset();
-    const out = await run<DraftResume>("import", { text: importText, role, jobDescription: jobDescription });
-    if (!out) return;
-    const resume = hydrateDraft(out, { ...emptyResume(), targetRole: role, jobDescription: jobDescription, customInstructions });
-    resume.title = `${resume.basics.name || "Imported"} resume${role ? `, ${role}` : ""}`;
-    const saved = store.create(resume);
-    await stashSourceFile(saved.id);
-    router.replace(`/editor/${saved.id}`);
+    try {
+      const inputs = importMode === "upload" ? importFiles.map((f) => ({ id: f.id, name: f.name, text: f.text })) : [{ id: uid(), name: "Pasted CV", text: importText }];
+      const sources: ProfileSource[] = [];
+      for (const [index, input] of inputs.entries()) {
+        setImportProgress({ index: index + 1, total: inputs.length, name: input.name });
+        const draft = await run<ProfileDraft>("parseProfile", { text: input.text });
+        if (!draft) return; // Never save a partial profile after failure or cancellation.
+        validateProfileDraft(draft, input.text);
+        sources.push({ ...input, draft });
+      }
+      const masterProfile = mergeProfiles(sources);
+      const resume = { ...emptyResume(), ...structuredClone(masterProfile.facts), masterProfile, targetRole: role, jobDescription, customInstructions };
+      resume.title = `${resume.basics.name || "Imported"} resume${role ? `, ${role}` : ""}`;
+      const saved = store.create(resume);
+      // Preserve the existing original-file link for single-file imports.
+      if (importMode === "upload" && importFiles.length === 1) {
+        try {
+          const file = importFiles[0].file;
+          const url = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          sessionStorage.setItem(`bespoke:srcfile:${saved.id}`, JSON.stringify({ name: file.name, url }));
+        } catch { /* Source text remains in the profile if session storage is full. */ }
+      }
+      router.replace(`/editor/${saved.id}`);
+    } catch (e) {
+      setImportError((e as Error).message || "Could not build the Master Profile.");
+    } finally {
+      importLock.current = false;
+      setProcessing(false);
+    }
   };
 
   const answered = answers.filter((a) => a.trim()).length;
@@ -583,24 +604,25 @@ export function Interview() {
               {busy && manual ? (
                 <div className="flex flex-col gap-5">
                   <div>
-                    <h1 className="font-display text-[clamp(1.7rem,3.4vw,2.3rem)] leading-tight">Tidy it up with your own AI</h1>
-                    <p className="mt-2 text-[15px] leading-relaxed text-ink-dim">Your resume text is packed into one prompt. Run it in any chat app and paste the reply back.</p>
+                    <h1 className="font-display text-[clamp(1.7rem,3.4vw,2.3rem)] leading-tight">Extract CV facts with your own AI</h1>
+                    <p className="mt-2 text-[15px] leading-relaxed text-ink-dim">Each CV gets its own extraction prompt. Run it in any chat app and paste the reply back; the next CV follows automatically.</p>
                   </div>
-                  <ManualInline />
+                  <p role="status" className="text-sm text-sub">CV {importProgress.index} of {importProgress.total}: {importProgress.name}</p>
+                  <ManualInline key={importProgress.index} />
                 </div>
-              ) : busy ? (
+              ) : processing ? (
                 <AiProgress
-                  title="Reading your resume"
+                  title="Building your Master Profile"
                   live={chars}
                   steps={["Parsing the text", "Finding your roles and dates", "Structuring the sections", "Grouping skills", "Finishing"]}
-                  note="It streams in as it is structured. Free models can take up to a minute."
+                  note={`CV ${importProgress.index} of ${importProgress.total}: ${importProgress.name}. Each CV is parsed separately.`}
                 />
               ) : (
                 <form
                   className="flex flex-col gap-6"
                   onSubmit={(e) => {
                     e.preventDefault();
-                    if (importText.trim().length > 40) void runImport();
+                    if (readyToImport) void runImport();
                   }}
                 >
                   <Button variant="ghost" size="sm" className="w-fit" onClick={() => go("setup")}>
@@ -615,10 +637,10 @@ export function Interview() {
 
                   <div>
                     <h1 className="font-display text-[clamp(1.9rem,4vw,2.6rem)] leading-tight">Bring your existing resume</h1>
-                    <p className="mt-2 max-w-[52ch] text-[15px] leading-relaxed text-ink-dim">Upload a file or paste the text. It comes back as a clean, parser-safe resume you can edit. Nothing is invented.</p>
+                    <p className="mt-2 max-w-[52ch] text-[15px] leading-relaxed text-ink-dim">Upload one or more CVs, or paste the text. Their facts become one Master Profile for future tailoring. Conflicting values are kept for review.</p>
                   </div>
 
-                  <Field label="Target role" hint="Optional. Sets the headline and steers skill grouping.">
+                  <Field label="Target role" hint="Optional. Used later for tailoring; imported facts stay unchanged.">
                     {(id, by) => <Input id={id} aria-describedby={by} value={role} onChange={(e) => setRole(e.target.value)} placeholder="Senior Frontend Engineer" />}
                   </Field>
 
@@ -643,7 +665,7 @@ export function Interview() {
                       <div>
                         <button
                           type="button"
-                          aria-label="Upload a resume file"
+                          aria-label="Upload CV files"
                           onClick={() => document.getElementById("import-file")?.click()}
                           onDragOver={(e) => {
                             e.preventDefault();
@@ -653,8 +675,7 @@ export function Interview() {
                           onDrop={(e) => {
                             e.preventDefault();
                             setImportDrag(false);
-                            const f = e.dataTransfer.files?.[0];
-                            if (f) void takeImportFile(f);
+                            void takeImportFiles(Array.from(e.dataTransfer.files));
                           }}
                           className={cn(
                             "flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed p-10 text-center transition-colors duration-150",
@@ -663,38 +684,32 @@ export function Interview() {
                         >
                           {importBusy ? (
                             <Spinner className="size-6 text-accent" />
-                          ) : importFile && !importFile.error ? (
-                            <>
-                              <span className="grid size-12 place-items-center rounded-xl bg-accent-soft text-accent">
-                                <FileText className="size-6" strokeWidth={1.5} />
-                              </span>
-                              <span className="text-[15px] font-medium text-ink">{importFile.name}</span>
-                              <span className="text-xs text-sub">{importFile.kind.toUpperCase()} · {importFile.chars.toLocaleString()} characters read · click to replace</span>
-                            </>
                           ) : (
                             <>
                               <span className="grid size-12 place-items-center rounded-xl bg-surface text-sub shadow-card">
                                 <Upload className="size-6" strokeWidth={1.5} />
                               </span>
-                              <span className="text-[15px] font-medium text-ink">Drop a PDF, DOCX or TXT, or click to choose</span>
+                              <span className="text-[15px] font-medium text-ink">Drop PDF, DOCX, TXT or MD files, or click to choose</span>
                               <span className="text-xs text-sub">Read in your browser. The file is never uploaded.</span>
                             </>
                           )}
                         </button>
-                        <input id="import-file" type="file" accept={ACCEPT} className="sr-only" onChange={(e) => e.target.files?.[0] && void takeImportFile(e.target.files[0])} />
-                        {importFile?.error && <p className="mt-2 text-[13px] text-danger">{importFile.error}</p>}
-                        {importFile && !importFile.error && importFile.chars < 200 && (
-                          <p className="mt-2 text-[13px] text-danger">Almost no text came out. This looks like a scanned or image PDF. Switch to Paste, or export a text-based file.</p>
-                        )}
-                        {importText.trim() && (
-                          <details className="mt-3">
-                            <summary className="cursor-pointer text-[13px] text-sub hover:text-ink">Preview the text we read</summary>
-                            <div className="mt-2 max-h-48 overflow-y-auto rounded-xl bg-raised p-3 font-mono text-[12px] leading-relaxed text-sub">
-                              {importText.slice(0, 1500)}
-                              {importText.length > 1500 && "..."}
-                            </div>
-                          </details>
-                        )}
+                        <input id="import-file" type="file" multiple accept={ACCEPT} className="sr-only" onChange={(e) => { void takeImportFiles(Array.from(e.target.files || [])); e.target.value = ""; }} />
+                        <ul className="mt-3 flex flex-col gap-2" aria-label="Uploaded CVs" aria-live="polite">
+                          {importFiles.map((file) => (
+                            <li key={file.id} className="rounded-xl border border-border bg-raised/50 p-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="break-words text-sm font-medium">{file.name}</p>
+                                  <p className="text-xs text-sub">{file.reading ? "Reading…" : `${file.kind.toUpperCase()} · ${file.chars.toLocaleString()} characters`}</p>
+                                </div>
+                                <Button variant="ghost" size="sm" aria-label={`Remove ${file.name}`} onClick={() => setImportFiles((files) => files.filter((f) => f.id !== file.id))}>Remove</Button>
+                              </div>
+                              {file.error && <p role="alert" className="mt-2 text-[13px] text-danger">{file.error}</p>}
+                              {!file.error && !file.reading && <details className="mt-2"><summary className="cursor-pointer text-xs text-sub">Preview extracted text</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-sub">{file.text}</pre></details>}
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     ) : (
                       <Textarea
@@ -707,18 +722,18 @@ export function Interview() {
                         className="font-mono text-[13px]"
                       />
                     )}
-                    <p className="text-xs text-sub">{importText.trim() ? `${words(importText)} words ready` : "Add at least a few lines."}</p>
+                    <p className="text-xs text-sub">{importMode === "upload" ? `${importFiles.length} CVs selected · up to 8 MB each` : importText.trim() ? `${words(importText)} words ready · maximum 100,000 characters` : "Add at least a few lines."}</p>
                   </div>
 
-                  {err && (
+                  {(importError || err) && (
                     <p role="alert" className="rounded-xl bg-danger-soft px-3.5 py-3 text-sm text-danger">
-                      {err}
+                      {importError || err}
                     </p>
                   )}
 
                   <div className="border-t border-line pt-6">
-                    <Button type="submit" variant="primary" size="lg" disabled={importText.trim().length <= 40 || importBusy}>
-                      {manual ? "Make the prompt" : "Read my resume"} <ArrowRight className="size-4" strokeWidth={2} />
+                    <Button type="submit" variant="primary" size="lg" disabled={!readyToImport || processing}>
+                      {manual ? "Make the prompt" : "Build Master Profile"} <ArrowRight className="size-4" strokeWidth={2} />
                     </Button>
                   </div>
                 </form>
@@ -733,7 +748,7 @@ export function Interview() {
                 {[
                   "Your text is split into roles, education, projects and skills.",
                   "Every employer, title, date and number is kept exactly.",
-                  "Weak lines are tightened; nothing is invented.",
+                  "Duplicate facts are merged; conflicting values stay available for review.",
                   "You land in the editor with a live, editable sheet.",
                 ].map((t, k) => (
                   <li key={t} className="flex gap-3">

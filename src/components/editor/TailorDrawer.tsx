@@ -15,22 +15,27 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
   const [result, setResult] = useState<TailorResult | null>(null);
   const [parts, setParts] = useState({ head: true, bullets: true, skills: true });
   const jd = resume.jobDescription;
+  const source = resume.masterProfile?.facts ?? resume;
+  const [analyzedSource, setAnalyzedSource] = useState<typeof source | null>(null);
 
   const analyze = async () => {
     setResult(null);
+    const facts = structuredClone(source);
+    setAnalyzedSource(facts);
     const out = await run<TailorResult>("tailor", {
       jobDescription: jd,
       customInstructions: resume.customInstructions,
       resume: {
-        headline: resume.basics.headline,
-        summary: resume.summary,
-        experience: resume.experience.map((e, index) => ({ index, role: e.role, company: e.company, bullets: e.bullets.filter(Boolean) })),
-        skills: resume.skills.map((g) => ({ name: g.name, items: g.items })),
+        headline: facts.basics.headline,
+        summary: facts.summary,
+        experience: facts.experience.map((e, index) => ({ index, role: e.role, company: e.company, bullets: e.bullets.filter(Boolean) })),
+        skills: facts.skills.map((g) => ({ name: g.name, items: g.items })),
         other: [
-          ...resume.achievements.filter((a) => a.trim()),
-          ...resume.projects.map((p) => `${p.name}: ${p.description} ${p.bullets.join(" ")}`),
-          ...resume.education.map((e) => `${e.degree} ${e.field} ${e.school}`),
-          ...resume.certifications.map((c) => c.name),
+          ...facts.achievements.filter((a) => a.trim()),
+          ...facts.projects.map((p) => `${p.name}: ${p.description} ${p.bullets.join(" ")}`),
+          ...facts.education.map((e) => `${e.degree} ${e.field} ${e.school}`),
+          ...facts.certifications.map((c) => c.name),
+          ...(resume.masterProfile ? [`Master Profile (all source facts): ${JSON.stringify(facts)}`, `Values requiring review: ${JSON.stringify(resume.masterProfile.conflicts)}. Do not choose or combine disputed values; omit them from new wording.`] : []),
         ].join("\n"),
       },
     });
@@ -38,7 +43,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
   };
 
   const apply = () => {
-    if (!result) return;
+    if (!result || !analyzedSource) return;
     update((r) => {
       const next = { ...r };
       if (parts.head) {
@@ -46,7 +51,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
         next.summary = result.summary || r.summary;
       }
       if (parts.bullets) {
-        next.experience = r.experience.map((e, i) => {
+        next.experience = analyzedSource.experience.map((e, i) => {
           const t = result.experience.find((x) => x.index === i);
           return t && t.bullets.length ? { ...e, bullets: t.bullets } : e;
         });
@@ -101,6 +106,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
         )
       }
     >
+      {resume.masterProfile && <p className="mb-4 text-sm text-ink-dim">Tailoring uses your Master Profile from {resume.masterProfile.sources.length} CVs. Review flagged values in the editor before applying changes.</p>}
       {!result && (
         <>
           <Field
@@ -140,7 +146,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
           </div>
 
           {result.experience.map((t) => {
-            const e = resume.experience[t.index];
+            const e = analyzedSource?.experience[t.index];
             if (!e) return null;
             return (
               <div key={t.index}>
