@@ -42,6 +42,8 @@ import { LinkedInDrawer } from "./LinkedInDrawer";
 import { AchievementsSection, CertificationsSection, DetailsSection, EducationSection, SummarySection } from "./Sections";
 import { ExperienceSection, ProjectsSection } from "./Entries";
 import { SkillsSection } from "./Skills";
+import { repairResume, resumeCounts } from "@/lib/resumeRepair";
+import { preserveResumeBackup, downloadResumeBackup, backupKey, type ResumeBackup } from "@/lib/resumeBackup";
 import { MasterProfilePanel } from "./MasterProfilePanel";
 import { TailorDrawer } from "./TailorDrawer";
 
@@ -53,7 +55,7 @@ type Drawer = "fit" | "tailor" | "cover" | "linkedin" | null;
 // Fields compared to decide what is unsaved. updatedAt/id are excluded.
 const DIFF_KEYS: (keyof Resume)[] = [
   "title", "basics", "summary", "achievements", "experience", "education", "projects", "skills",
-  "certifications", "sectionOrder", "pageBreaks", "template", "paper", "targetRole", "jobDescription", "customInstructions",
+  "certifications", "masterProfile", "sectionOrder", "pageBreaks", "template", "paper", "targetRole", "jobDescription", "customInstructions",
 ];
 
 const SECTION_ICON: Record<Active, typeof User> = {
@@ -77,6 +79,7 @@ export function Editor({ id }: { id: string }) {
   const [drawer, setDrawer] = useState<Drawer>(null);
   const [mobileView, setMobileView] = useState<"edit" | "preview">("edit");
   const [flash, setFlash] = useState<string | null>(null);
+  const [repairMessage, setRepairMessage] = useState<string | null>(null);
 
   const [srcFile, setSrcFile] = useState<{ name: string; url: string } | null>(null);
 
@@ -147,6 +150,30 @@ export function Editor({ id }: { id: string }) {
   const say = (msg: string) => {
     setFlash(msg);
     setTimeout(() => setFlash(null), 1800);
+  };
+
+  const repair = () => {
+    if (!resume || !stored) return;
+    try {
+      const backup = preserveResumeBackup(localStorage, stored, resume);
+      downloadResumeBackup(backup);
+      const next = repairResume(resume);
+      const before = resumeCounts(resume), after = resumeCounts(next);
+      setDraft(next);
+      setRepairMessage(`Repair staged: jobs ${before.jobs} → ${after.jobs}, bullets ${before.bullets} → ${after.bullets}, skills ${before.skills} → ${after.skills}. Your saved original and unsaved edits were backed up. Review and Save, or Discard to leave the saved resume unchanged.`);
+    } catch (e) {
+      setRepairMessage(`Repair stopped: ${(e as Error).message}. Your editor changes are intact.`);
+    }
+  };
+  const exportOriginal = () => {
+    if (!resume || !stored) return;
+    const raw = localStorage.getItem(backupKey(id));
+    downloadResumeBackup(raw ? JSON.parse(raw) as ResumeBackup : { version: 1, createdAt: Date.now(), saved: stored, working: resume });
+  };
+  const updateTailor: Update = (patch) => {
+    if (!resume || !stored) return;
+    preserveResumeBackup(localStorage, stored, resume);
+    update(patch);
   };
 
   const save = () => {
@@ -312,7 +339,7 @@ export function Editor({ id }: { id: string }) {
             ))}
           </div>
           <div className="mx-auto max-w-2xl px-5 py-8 md:px-8 md:py-10">
-            {resume.masterProfile && <MasterProfilePanel profile={resume.masterProfile} />}
+            {resume.masterProfile && <MasterProfilePanel profile={resume.masterProfile} onRepair={repair} onExport={exportOriginal} message={repairMessage} />}
             {active === "basics" && <DetailsSection resume={resume} update={update} />}
             {active === "summary" && <SummarySection resume={resume} update={update} />}
             {active === "achievements" && <AchievementsSection resume={resume} update={update} />}
@@ -415,7 +442,7 @@ export function Editor({ id }: { id: string }) {
           requestAnimationFrame(() => document.getElementById("main")?.scrollTo({ top: 0, behavior: "smooth" }));
         }}
       />
-      <TailorDrawer open={drawer === "tailor"} onClose={() => setDrawer(null)} resume={resume} update={update} />
+      <TailorDrawer open={drawer === "tailor"} onClose={() => setDrawer(null)} resume={resume} update={updateTailor} />
       <CoverLetterDrawer open={drawer === "cover"} onClose={() => setDrawer(null)} resume={resume} />
       <LinkedInDrawer open={drawer === "linkedin"} onClose={() => setDrawer(null)} resume={resume} />
 

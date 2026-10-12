@@ -5,6 +5,7 @@ import { Plus, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Field, Input, Textarea } from "@/components/ui/Field";
 import { emptyCertification, emptyEducation, type Resume } from "@/lib/schema";
+import { uniqueBullets } from "@/lib/canonicalProfile";
 import { aiContext, resumeToText } from "@/lib/text";
 import type { Update } from "./Editor";
 import { BulletList, EntryFrame, SectionHeader } from "./Entries";
@@ -174,7 +175,7 @@ export function AchievementsSection({ resume, update }: Props) {
   };
 
   const add = (items: string[]) => {
-    update({ achievements: [...filled, ...items] });
+    update((r) => ({ ...r, achievements: uniqueBullets([...r.achievements, ...items]) }));
     setSuggested((s) => (s ? s.filter((x) => !items.includes(x)) : s));
   };
 

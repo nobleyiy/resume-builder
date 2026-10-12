@@ -1,4 +1,4 @@
-import { SECTION_LABELS, type Resume } from "./schema";
+import { SECTION_LABELS, type Resume } from "./schema.ts";
 
 const dates = (start: string, end: string, current?: boolean) =>
   [start, current ? "Present" : end].filter(Boolean).join(" - ");

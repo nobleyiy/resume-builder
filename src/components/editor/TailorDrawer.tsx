@@ -5,22 +5,25 @@ import { Scissors } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Drawer } from "@/components/ui/Drawer";
 import { Field, Textarea } from "@/components/ui/Field";
-import { uid, type Resume, type TailorResult } from "@/lib/schema";
+import { type Resume, type TailorResult } from "@/lib/schema";
+import { applyTailorRevision, repairResume, tailoringFacts } from "@/lib/resumeRepair";
 import type { Update } from "./Editor";
 import { KeywordChips } from "./bits";
 import { useAi } from "./useAi";
 
 export function TailorDrawer({ open, onClose, resume, update }: { open: boolean; onClose: () => void; resume: Resume; update: Update }) {
   const { run, busy, error } = useAi();
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [result, setResult] = useState<TailorResult | null>(null);
   const [parts, setParts] = useState({ head: true, bullets: true, skills: true });
   const jd = resume.jobDescription;
-  const source = resume.masterProfile?.facts ?? resume;
-  const [analyzedSource, setAnalyzedSource] = useState<typeof source | null>(null);
+  const [analyzedSource, setAnalyzedSource] = useState<import("@/lib/masterProfile").ProfileFacts | null>(null);
 
   const analyze = async () => {
     setResult(null);
-    const facts = structuredClone(source);
+    setApplyError(null);
+    const facts = tailoringFacts(resume);
+    const evidence = repairResume(resume).masterProfile;
     setAnalyzedSource(facts);
     const out = await run<TailorResult>("tailor", {
       jobDescription: jd,
@@ -35,7 +38,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
           ...facts.projects.map((p) => `${p.name}: ${p.description} ${p.bullets.join(" ")}`),
           ...facts.education.map((e) => `${e.degree} ${e.field} ${e.school}`),
           ...facts.certifications.map((c) => c.name),
-          ...(resume.masterProfile ? [`Master Profile (all source facts): ${JSON.stringify(facts)}`, `Values requiring review: ${JSON.stringify(resume.masterProfile.conflicts)}. Do not choose or combine disputed values; omit them from new wording.`] : []),
+          ...(resume.masterProfile ? [`Master Profile (all source facts): ${JSON.stringify(evidence?.facts)}`, `Values requiring review: ${JSON.stringify(evidence?.conflicts)}. Do not choose or combine disputed values; omit them from new wording.`] : []),
         ].join("\n"),
       },
     });
@@ -44,23 +47,13 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
 
   const apply = () => {
     if (!result || !analyzedSource) return;
-    update((r) => {
-      const next = { ...r };
-      if (parts.head) {
-        next.basics = { ...r.basics, headline: result.headline || r.basics.headline };
-        next.summary = result.summary || r.summary;
-      }
-      if (parts.bullets) {
-        next.experience = analyzedSource.experience.map((e, i) => {
-          const t = result.experience.find((x) => x.index === i);
-          return t && t.bullets.length ? { ...e, bullets: t.bullets } : e;
-        });
-      }
-      if (parts.skills && result.skills.length) {
-        next.skills = result.skills.map((g) => ({ ...g, id: uid() }));
-      }
-      return next;
-    });
+    try {
+      applyTailorRevision(resume, analyzedSource, result, parts); // Validate before scheduling the state update.
+      update((r) => applyTailorRevision(r, analyzedSource, result, parts));
+    } catch (e) {
+      setApplyError((e as Error).message);
+      return;
+    }
     setResult(null);
     onClose();
   };
@@ -106,6 +99,7 @@ export function TailorDrawer({ open, onClose, resume, update }: { open: boolean;
         )
       }
     >
+      {applyError && <p role="alert" className="mb-3 text-sm text-danger">{applyError}</p>}
       {resume.masterProfile && <p className="mb-4 text-sm text-ink-dim">Tailoring uses your Master Profile from {resume.masterProfile.sources.length} CVs. Review flagged values in the editor before applying changes.</p>}
       {!result && (
         <>
