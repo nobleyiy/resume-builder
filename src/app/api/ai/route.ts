@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { TASKS, type TaskName } from "@/lib/prompts";
-import { buildPrompt } from "@/lib/promptText";
+import { buildPrompt, compactSchema } from "@/lib/promptText";
 import { openAiRequest } from "@/lib/openAiRequest";
 import { jsonCandidates } from "@/lib/extractJson";
 
@@ -64,7 +64,7 @@ function noThink(base: Record<string, unknown>) {
 }
 
 /** Per-provider overrides supplied by the client (from the provider config UI). */
-type Overrides = { model?: string; baseUrl?: string };
+type Overrides = { model?: string; baseUrl?: string; responseSchema?: Record<string, unknown> };
 
 const ollamaProvider = (base: Record<string, unknown>, ovr?: Overrides): Provider => {
   const url = ovr?.baseUrl?.trim() || process.env.OLLAMA_BASE_URL?.trim() || OLLAMA_DEFAULT_BASE;
@@ -94,7 +94,7 @@ function providerByName(name: ProviderChoice, headerKey: string | null, base: Re
       const pool = openAiPool();
       const key = (headerKey && !headerKey.startsWith("sk-or-") && !headerKey.startsWith("nvapi-") ? headerKey : null) || pool[0]?.key;
       const model = ovr?.model?.trim() || pool[0]?.model || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
-      return key ? { url: `${OPENAI_BASE}/chat/completions`, apiKey: key, headers: {}, body: openAiRequest(base, model), label: "OpenAI", timeoutMs: 60_000 } : null;
+      return key ? { url: `${OPENAI_BASE}/chat/completions`, apiKey: key, headers: {}, body: openAiRequest(base, model, ovr?.responseSchema), label: "OpenAI", timeoutMs: 60_000 } : null;
     }
     case "nim": {
       const key = (headerKey?.startsWith("nvapi-") ? headerKey : null) || process.env.NIM_API_KEY?.trim();
@@ -114,7 +114,7 @@ function buildProviders(headerKey: string | null, base: Record<string, unknown>,
     return p ? [p] : [];
   }
   const orBody = () => ({ ...base, model: orModels()[0], models: orModels(), reasoning: { exclude: true }, max_tokens: 8000 });
-  const oaBody = (model: string) => openAiRequest(base, model);
+  const oaBody = (model: string) => openAiRequest(base, model, ovr?.responseSchema);
   const list: Provider[] = [];
   if (process.env.OLLAMA_MODEL?.trim()) list.push(ollamaProvider(base));
   if (headerKey?.startsWith("sk-or-")) list.push({ url: `${OPENROUTER_BASE}/chat/completions`, apiKey: headerKey, headers: OR_HEADERS, body: orBody(), label: "OpenRouter", timeoutMs: 45_000 });
@@ -159,13 +159,14 @@ async function streamOnce(prov: Provider, onDelta: (chars: number, full: string)
         if (!t.startsWith("data:")) continue;
         const payload = t.slice(5).trim();
         if (payload === "[DONE]") continue;
-        let j: { choices?: { delta?: { content?: string } }[]; error?: { message?: string; code?: number } };
+        let j: { choices?: { delta?: { content?: string }; finish_reason?: string }[]; error?: { message?: string; code?: number } };
         try {
           j = JSON.parse(payload);
         } catch {
           continue; // keepalive / partial line
         }
         if (j.error) throw new CallError(j.error.message || "Provider error mid-stream.", Number(j.error.code) || 502);
+        if (j.choices?.[0]?.finish_reason === "length") throw new CallError("The model reached its output limit before completing the CV. Try a shorter CV or a model with a larger output limit.", 422);
         const delta = j.choices?.[0]?.delta?.content ?? "";
         if (delta) {
           full += delta;
@@ -192,9 +193,10 @@ async function textOnce(prov: Provider): Promise<string> {
       signal: ctrl.signal,
     });
     const data = (await res.json().catch(() => null)) as
-      | { choices?: { message?: { content?: string; reasoning?: string } }[]; error?: { message?: string; code?: number } }
+      | { choices?: { message?: { content?: string; reasoning?: string }; finish_reason?: string }[]; error?: { message?: string; code?: number } }
       | null;
     if (!res.ok || data?.error) throw new CallError(data?.error?.message || `Provider error (${res.status}).`, Number(data?.error?.code) || res.status);
+    if (data?.choices?.[0]?.finish_reason === "length") throw new CallError("The model reached its output limit before completing the CV. Try a shorter CV or a model with a larger output limit.", 422);
     const msg = data?.choices?.[0]?.message;
     const content = msg?.content?.trim() || msg?.reasoning?.trim() || "";
     if (!content) throw new CallError("The model returned an empty reply.", 502);
@@ -252,7 +254,7 @@ export async function POST(req: Request) {
   const rawChoice = req.headers.get("x-ai-provider")?.trim();
   const choice: ProviderChoice = (["auto", "ollama", "openrouter", "openai", "nim"] as const).includes(rawChoice as ProviderChoice) ? (rawChoice as ProviderChoice) : "auto";
   const headerKey = req.headers.get("x-ai-key")?.trim() || req.headers.get("x-openai-key")?.trim() || null;
-  const ovr: Overrides = { model: req.headers.get("x-ai-model")?.trim() || undefined, baseUrl: req.headers.get("x-ai-base")?.trim() || undefined };
+  const ovr: Overrides = { model: req.headers.get("x-ai-model")?.trim() || undefined, baseUrl: req.headers.get("x-ai-base")?.trim() || undefined, responseSchema: parsed.data.task === "parseProfile" ? compactSchema(task.output) : undefined };
   const providers = buildProviders(headerKey, base, choice, ovr);
   if (providers.length === 0) {
     const hint =

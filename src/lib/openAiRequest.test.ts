@@ -25,3 +25,16 @@ test("reasoning models omit unsupported sampling parameters", () => {
   }
   assert.equal(base.temperature, 0);
 });
+
+test("CV parsing requests enforce the exact schema through OpenAI structured outputs", async () => {
+  const { ProfileDraft } = await import("./schema.ts");
+  const { z } = await import("zod");
+  const schema = z.toJSONSchema(ProfileDraft);
+  delete schema.$schema;
+  const body = openAiRequest(base, "gpt-4.1-mini", schema);
+  assert.deepEqual(body.response_format, { type: "json_schema", json_schema: { name: "cv_facts", strict: true, schema } });
+  assert.equal(schema.additionalProperties, false);
+  assert.ok(schema.required?.includes("achievements"));
+  assert.ok(schema.required?.includes("experience"));
+  assert.deepEqual(base.response_format, { type: "json_object" });
+});
