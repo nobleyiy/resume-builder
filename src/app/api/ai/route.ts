@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { TASKS, type TaskName } from "@/lib/prompts";
 import { buildPrompt } from "@/lib/promptText";
+import { openAiRequest } from "@/lib/openAiRequest";
 import { jsonCandidates } from "@/lib/extractJson";
 
 export const runtime = "nodejs";
@@ -93,7 +94,7 @@ function providerByName(name: ProviderChoice, headerKey: string | null, base: Re
       const pool = openAiPool();
       const key = (headerKey && !headerKey.startsWith("sk-or-") && !headerKey.startsWith("nvapi-") ? headerKey : null) || pool[0]?.key;
       const model = ovr?.model?.trim() || pool[0]?.model || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
-      return key ? { url: `${OPENAI_BASE}/chat/completions`, apiKey: key, headers: {}, body: { ...base, model, max_tokens: 2000 }, label: "OpenAI", timeoutMs: 60_000 } : null;
+      return key ? { url: `${OPENAI_BASE}/chat/completions`, apiKey: key, headers: {}, body: openAiRequest(base, model), label: "OpenAI", timeoutMs: 60_000 } : null;
     }
     case "nim": {
       const key = (headerKey?.startsWith("nvapi-") ? headerKey : null) || process.env.NIM_API_KEY?.trim();
@@ -113,7 +114,7 @@ function buildProviders(headerKey: string | null, base: Record<string, unknown>,
     return p ? [p] : [];
   }
   const orBody = () => ({ ...base, model: orModels()[0], models: orModels(), reasoning: { exclude: true }, max_tokens: 8000 });
-  const oaBody = (model: string) => ({ ...base, model, max_tokens: 2000 });
+  const oaBody = (model: string) => openAiRequest(base, model);
   const list: Provider[] = [];
   if (process.env.OLLAMA_MODEL?.trim()) list.push(ollamaProvider(base));
   if (headerKey?.startsWith("sk-or-")) list.push({ url: `${OPENROUTER_BASE}/chat/completions`, apiKey: headerKey, headers: OR_HEADERS, body: orBody(), label: "OpenRouter", timeoutMs: 45_000 });
