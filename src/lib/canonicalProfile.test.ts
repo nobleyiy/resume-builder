@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { emptyResume, type ProfileDraft, type Resume, type TailorResult } from "./schema.ts";
 import { mergeProfiles, type ProfileSource } from "./masterProfile.ts";
 import { repairResume, applyTailorRevision, resumeCounts, tailoringFacts } from "./resumeRepair.ts";
-import { uniqueBullets, dateKey } from "./canonicalProfile.ts";
+import { uniqueBullets, uniqueSkills, dateKey } from "./canonicalProfile.ts";
 import { preserveResumeBackup } from "./resumeBackup.ts";
 
 const draft = (): ProfileDraft => ({ basics: emptyResume().basics, summary: "", achievements: [], experience: [{ company: "Geidea", role: "Service Delivery Senior Manager", start: "2022", end: "June 2025", current: false, location: "", bullets: ["Designed networks", "Reduced costs by 10%"] }], education: [{ school: "City University", degree: "Bachelor of Science", field: "Computing", start: "2016", end: "2019", location: "", notes: "" }], certifications: [{ name: "Project Management Professional (PMP)", issuer: "PMI", date: "2020" }, { name: "Cisco Certified Network Professional", issuer: "Cisco", date: "2021" }], projects: [], skills: [{ name: "Tools", items: ["MS Office", "TypeScript", "C++", "C#"] }] });
@@ -54,10 +54,35 @@ test("degree, PMP, CCNP and cross-category skill aliases are deduplicated", () =
   assert.equal(p.facts.skills.flatMap((g) => g.items).length, 4);
 });
 
+test("school names with a location suffix identify the same degree", () => {
+  const a = draft(), b = draft();
+  a.education[0].school = "International University of Africa, Sudan";
+  b.education[0].school = "International University of Africa";
+  b.education[0].location = "Sudan";
+  assert.equal(mergeProfiles([source("a", a), source("b", b)]).facts.education.length, 1);
+});
+
 test("exact, supported semantic and within-bullet repeats are removed, while metrics and scope survive", () => {
   assert.deepEqual(uniqueBullets(["Designed networks", "Designed networks.", "Network design", "Designed networks. Designed networks.", "Designed secure corporate networks Designed secure corporate networks", "Designed secure corporate networks and Designed secure corporate networks"]), ["Designed networks", "Designed secure corporate networks"]);
   const distinct = ["Reduced costs by 10%", "Reduced costs by 20%", "Reduced costs by 10.5%", "Reduced costs by 5.10%", "Designed networks for Acme", "Designed networks with Acme", "Maintained networks", "Designed networks without downtime"];
   assert.deepEqual(uniqueBullets(distinct), distinct);
+});
+
+test("semantic bullet coverage removes alternate CV wording but retains new facts and metrics", () => {
+  const bullets = [
+    "Designed and implemented network solutions for SME clients, translating customer requirements into suitable connectivity and infrastructure designs.",
+    "Provided technical analysis and pre-sales support, advising customers on solution suitability and implementation needs.",
+    "Delivered network maintenance, troubleshooting, and customer support to sustain reliable client operations.",
+    "Designed and implemented network solutions for SME clients, improving infrastructure reliability.",
+    "Led technical analysis and pre-sales support, advising customers on optimal IT solutions.",
+    "Provided network maintenance and support, ensuring 99.9% uptime for client operations.",
+  ];
+  assert.deepEqual(uniqueBullets(bullets), [bullets[0], bullets[1], bullets[2], bullets[5]]);
+  assert.deepEqual(uniqueBullets(uniqueBullets(bullets)), uniqueBullets(bullets));
+});
+
+test("overlapping skill labels are removed across categories without conflating short technologies", () => {
+  assert.deepEqual(uniqueSkills(["SLA and vendor performance reviews", "Vendor performance reviews", "SLA oversight", "C++", "C#", "C++"]), ["SLA and vendor performance reviews", "C++", "C#"]);
 });
 
 test("metrics differing on the same claim remain as evidence and are flagged", () => {

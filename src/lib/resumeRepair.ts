@@ -1,4 +1,4 @@
-import { canonicalFacts, MATCH_VERSION, uniqueBullets, skillKey } from "./canonicalProfile.ts";
+import { canonicalFacts, MATCH_VERSION, uniqueBullets, uniqueSkills } from "./canonicalProfile.ts";
 import { mergeProfiles, type ProfileConflict, type ProfileFacts } from "./masterProfile.ts";
 import { resumeToText } from "./text.ts";
 import { emptyResume, type Resume, type TailorResult } from "./schema.ts";
@@ -9,6 +9,7 @@ const factsOf = (r: Resume): ProfileFacts => ({ basics: r.basics, summary: r.sum
  * This keeps deletions, added facts and unsaved revisions made in the editor. */
 export function repairResume(current: Resume): Resume {
   const result = canonicalFacts([{ facts: factsOf(current), source: "Working resume", sourceId: current.id }]);
+  if (current.masterProfile?.mergeVersion === MATCH_VERSION && JSON.stringify(factsOf(current)) === JSON.stringify(result.facts)) return structuredClone(current);
   const next: Resume = { ...structuredClone(current), ...result.facts, sectionOrder: [...new Set(current.sectionOrder)] };
   if (current.masterProfile) {
     const rebuilt = mergeProfiles(current.masterProfile.sources);
@@ -52,8 +53,8 @@ export function applyTailorRevision(current: Resume, source: ProfileFacts, resul
     });
   }
   if (parts.skills) {
-    const seen = new Set<string>();
-    next.skills = result.skills.map((g, index) => ({ ...g, id: `tailored-skills-${index}`, items: g.items.filter((v) => { const k = skillKey(v); if (!k || seen.has(k)) return false; seen.add(k); return true; }) })).filter((g) => g.items.length);
+    const allowed = new Set(uniqueSkills(result.skills.flatMap((g) => g.items)));
+    next.skills = result.skills.map((g, index) => ({ ...g, id: `tailored-skills-${index}`, items: g.items.filter((v) => { if (!allowed.has(v)) return false; allowed.delete(v); return true; }) })).filter((g) => g.items.length);
   }
   const cleaned = canonicalFacts([{ facts: factsOf(next), source: "AI revision", sourceId: current.id }]);
   // Only replacement sections and redundant cross-section text are changed.

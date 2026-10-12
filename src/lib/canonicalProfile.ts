@@ -1,10 +1,11 @@
 import type { Resume } from "./schema.ts";
 import type { ProfileConflict, ProfileFacts } from "./masterProfile.ts";
 
-export const MATCH_VERSION = 2;
+export const MATCH_VERSION = 3;
 export const normalized = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim();
 const words = (s: string) => normalized(s).replace(/[.,()®™]/g, " ").replace(/\s+/g, " ").trim();
 export const companyKey = (s: string) => words(s).replace(/\b(?:incorporated|inc|limited|ltd|llc|l l c|corporation|corp|co)\b\s*$/g, "").trim();
+export const schoolKey = (s: string) => companyKey(s).replace(/[, -]+(?:sudan|saudi arabia|united kingdom|united states|usa|uk|uae)$/g, "").trim();
 export const roleKey = (s: string) => words(s).replace(/\bsr\b/g, "senior").replace(/\bjr\b/g, "junior").replace(/\bmgr\b/g, "manager").replace(/\basst\b/g, "assistant").replace(/\bvp\b/g, "vice president").split(/\s+/).sort().join(" ");
 export const degreeKey = (s: string) => words(s)
   .replace(/\b(?:b sc|bsc|bachelor(?:'s|s)?(?: of)? science)\b/g, "bachelor science")
@@ -21,6 +22,26 @@ export function certificationKey(s: string): string {
 export const skillKey = (s: string) => certificationKey(s)
   .replace(/\bms office\b/g, "microsoft office").replace(/\bms excel\b/g, "microsoft excel")
   .replace(/\bjs\b/g, "javascript").replace(/\bts\b/g, "typescript");
+
+const semanticStopWords = new Set("a an the and or of to for in on at by with from as is are was were be been being that this these those it its their our while through across within into including include such using used use ensure ensuring ensured support supported supporting lead led leading manage managed managing provide provided providing develop developed developing design designed designing implement implemented implementing improve improved improving enhance enhanced enhancing establish established establishing coordinate coordinated coordinating work worked working contribute contributed contributing help helped helping review reviewed reviewing successfully key role played drive driving".split(" "));
+const semanticStem = (token: string) => {
+  const aliases: Record<string, string> = { operations: "operation", operational: "operation", regulatory: "compliance", regulations: "compliance", policies: "policy", processes: "process", systems: "system", services: "service", networks: "network", solutions: "solution", vendors: "vendor", suppliers: "vendor", stakeholders: "stakeholder", initiatives: "initiative", projects: "project", certifications: "certification", frameworks: "framework" };
+  if (aliases[token]) return aliases[token];
+  for (const suffix of ["ization", "isation", "ments", "ment", "tion", "ing", "ed", "ies", "s"]) if (token.length > suffix.length + 3 && token.endsWith(suffix)) return token.slice(0, -suffix.length);
+  return token;
+};
+export function semanticTokens(value: string): Set<string> {
+  const body = value.includes(":") ? value.slice(value.indexOf(":") + 1) : value;
+  return new Set(normalized(body).replace(/\bpre[ -]sales\b/g, "presales").match(/[a-z0-9]+(?:\.[0-9]+)?%?/g)?.filter((token) => !semanticStopWords.has(token)).map(semanticStem) || []);
+}
+const numbers = (value: string) => new Set(normalized(value).match(/\b\d+(?:\.\d+)?%?\b/g) || []);
+const hasNewNumber = (value: string, covered: Set<string>) => [...numbers(value)].some((n) => !covered.has(n));
+const coveredBy = (value: string, covered: Set<string>, noveltyLimit: number, minimumShared: number) => {
+  const tokens = semanticTokens(value);
+  if (!tokens.size || hasNewNumber(value, covered)) return false;
+  const shared = [...tokens].filter((token) => covered.has(token)).length;
+  return shared >= minimumShared && (tokens.size - shared) / tokens.size <= noveltyLimit;
+};
 
 const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 export function dateKey(s: string): string {
@@ -93,15 +114,41 @@ export function cleanBullet(input: string): string {
       if (first === second) tokens.splice(i + size, size + 1);
     }
   }
+  // Source CVs sometimes contain a phrase pasted twice with one joining word
+  // between copies. Remove only the second verbatim sequence.
+  for (let size = Math.floor(tokens.length / 2); size >= 4; size--) {
+    for (let first = 0; first + size < tokens.length; first++) {
+      const phrase = tokens.slice(first, first + size).map((w) => normalized(w).replace(/[,;.]$/, "")).join(" ");
+      for (let second = first + size; second + size <= tokens.length; second++) {
+        const candidate = tokens.slice(second, second + size).map((w) => normalized(w).replace(/[,;.]$/, "")).join(" ");
+        if (phrase === candidate) tokens.splice(second, size);
+      }
+    }
+  }
+  for (let i = tokens.length - 1; i > 0; i--) if (normalized(tokens[i]).replace(/[,;.]$/, "") === normalized(tokens[i - 1]).replace(/[,;.]$/, "")) tokens.splice(i, 1);
   return tokens.join(" ");
 }
 export function uniqueBullets(values: string[]): string[] {
   const seen = new Set<string>();
+  const covered = new Set<string>();
   return values.map(cleanBullet).filter((s) => {
     const k = bulletKey(s);
-    if (!k || seen.has(k)) return false;
-    seen.add(k); return true;
+    if (!k || seen.has(k) || coveredBy(s, covered, 0.35, 4)) return false;
+    seen.add(k); semanticTokens(s).forEach((token) => covered.add(token)); return true;
   });
+}
+
+/** Keep the first source wording for a skill and discard later labels whose
+ * meaning is already covered by the accumulated canonical skill list. */
+export function uniqueSkills(values: string[]): string[] {
+  const seen = new Set<string>(), covered = new Set<string>(), result: string[] = [];
+  for (const value of values) {
+    const key = skillKey(value);
+    const tokens = semanticTokens(value);
+    if (!key || seen.has(key) || (tokens.size > 1 && coveredBy(value, covered, 0.5, 1))) continue;
+    seen.add(key); semanticTokens(value).forEach((token) => covered.add(token)); result.push(value);
+  }
+  return result;
 }
 
 export type EvidenceRecord = { section: string; entryId: string; sourceId: string; source: string; original: unknown };
@@ -130,7 +177,7 @@ export function canonicalFacts(inputs: FactInput[]): { facts: ProfileFacts; conf
       const entry = raw as unknown as Entry;
       let identity: string;
       if (section === "experience") identity = entry.company && entry.role ? `${companyKey(String(entry.company))}|${roleKey(String(entry.role))}` : `unknown|${JSON.stringify(Object.fromEntries(Object.entries(entry).filter(([k]) => k !== "id")))}`;
-      else if (section === "education") identity = entry.school && entry.degree ? `${companyKey(String(entry.school))}|${degreeKey(String(entry.degree))}` : `unknown|${JSON.stringify(Object.fromEntries(Object.entries(entry).filter(([k]) => k !== "id")))}`;
+      else if (section === "education") identity = entry.school && entry.degree ? `${schoolKey(String(entry.school))}|${degreeKey(String(entry.degree))}` : `unknown|${JSON.stringify(Object.fromEntries(Object.entries(entry).filter(([k]) => k !== "id")))}`;
       else identity = section === "certifications" ? certificationKey(String(entry.name)) : words(String(entry.name));
       const start = String(entry.start || "");
       const candidates = groups.filter((g) => {
@@ -168,7 +215,7 @@ export function canonicalFacts(inputs: FactInput[]): { facts: ProfileFacts; conf
         if (field === "id") continue;
         if (Array.isArray(entry[field])) entry[field] = uniqueBullets(group.records.flatMap((r) => r.entry[field] as string[]));
         else if (typeof entry[field] === "string") {
-          const match = field === "company" || field === "school" ? companyKey : field === "role" ? roleKey : field === "degree" ? degreeKey : field === "name" && section === "certifications" ? certificationKey : field === "start" || field === "end" || field === "date" ? dateKey : normalized;
+          const match = field === "company" ? companyKey : field === "school" ? schoolKey : field === "role" ? roleKey : field === "degree" ? degreeKey : field === "name" && section === "certifications" ? certificationKey : field === "start" || field === "end" || field === "date" ? dateKey : normalized;
           entry[field] = scalar(`${section} ${index + 1}: ${field}`, group.records.map((r) => ({ value: r.entry[field] as string, source: r.input.source })), match, entry.id, field === "start" || field === "end" || field === "date");
         }
       }
@@ -208,23 +255,28 @@ export function canonicalFacts(inputs: FactInput[]): { facts: ProfileFacts; conf
   facts.education = mergeEntries("education") as unknown as Resume["education"];
   facts.certifications = mergeEntries("certifications") as unknown as Resume["certifications"];
   facts.projects = mergeEntries("projects") as unknown as Resume["projects"];
-  const seenSkills = new Set<string>();
   const skillGroups = new Map<string, Resume["skills"][number]>();
   for (const input of inputs) for (const raw of input.facts.skills) {
     const group = skillGroups.get(words(raw.name)) || { ...raw, items: [] };
     for (const item of raw.items) {
-      const k = skillKey(item);
-      if (k && !seenSkills.has(k)) { group.items.push(item); seenSkills.add(k); }
+      group.items.push(item);
       provenance.push({ section: "skills", entryId: group.id, sourceId: input.sourceId, source: input.source, original: item });
     }
     skillGroups.set(words(raw.name), group);
   }
-  facts.skills = [...skillGroups.values()].filter((g) => g.items.length);
+  const allSkills = uniqueSkills([...skillGroups.values()].flatMap((g) => g.items));
+  const remainingSkills = new Set(allSkills);
+  facts.skills = [...skillGroups.values()].map((g) => ({ ...g, items: g.items.filter((item) => {
+    if (!remainingSkills.has(item)) return false;
+    remainingSkills.delete(item); return true;
+  }) })).filter((g) => g.items.length);
   facts.achievements = uniqueBullets(inputs.flatMap((i) => i.facts.achievements));
   for (const input of inputs) for (const value of input.facts.achievements) provenance.push({ section: "achievements", entryId: "", sourceId: input.sourceId, source: input.source, original: value });
-  const used = new Set(facts.experience.flatMap((e) => e.bullets.map(bulletKey)));
-  facts.projects = facts.projects.map((p) => ({ ...p, description: used.has(bulletKey(p.description)) ? "" : p.description, bullets: p.bullets.filter((b) => !used.has(bulletKey(b))) })).filter((p, i) => p.description || p.bullets.length || p.link || (!facts.projects[i].description && !facts.projects[i].bullets.length));
-  facts.projects.forEach((p) => { used.add(bulletKey(p.description)); p.bullets.forEach((b) => used.add(bulletKey(b))); });
-  facts.achievements = facts.achievements.filter((b) => !used.has(bulletKey(b)));
+  const used = new Set<string>(), usedExact = new Set<string>();
+  facts.experience.flatMap((e) => e.bullets).forEach((b) => { usedExact.add(bulletKey(b)); semanticTokens(b).forEach((token) => used.add(token)); });
+  const redundant = (value: string) => !!value && (usedExact.has(bulletKey(value)) || coveredBy(value, used, 0.35, 4));
+  facts.projects = facts.projects.map((p) => ({ ...p, description: redundant(p.description) ? "" : p.description, bullets: p.bullets.filter((b) => !redundant(b)) })).filter((p, i) => p.description || p.bullets.length || p.link || (!facts.projects[i].description && !facts.projects[i].bullets.length));
+  facts.projects.forEach((p) => { if (p.description) usedExact.add(bulletKey(p.description)); semanticTokens(p.description).forEach((token) => used.add(token)); p.bullets.forEach((b) => { usedExact.add(bulletKey(b)); semanticTokens(b).forEach((token) => used.add(token)); }); });
+  facts.achievements = facts.achievements.filter((b) => !redundant(b));
   return { facts, conflicts, provenance };
 }
